@@ -560,7 +560,13 @@ async function setupEvents(){
       money: tasks.filter(t=>t.bucket==="money"),
       extra: tasks.filter(t=>t.bucket==="extra"),
     };
-    await pdfAgendaDia(state.day, tasksByBucket, appts, peopleMap);
+    await BTXPDF.pdfToday({
+      date: state.day,
+      tasksByBucket,
+      appts,
+      peopleIndex:
+  Object.fromentries(peoplemap)
+    });
   };
 
   $("#btnCashPDF").onclick = async () => {
