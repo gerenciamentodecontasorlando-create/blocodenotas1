@@ -1133,3 +1133,129 @@ document.addEventListener("DOMContentLoaded", async ()=>{
   setView("today");
   await renderAll();
 });
+/* =========================================================
+   BTX FLOW • APP (PARTE 2)
+   Ajustes finais / compat / pequenos helpers
+   ========================================================= */
+
+/* --------- Correção: o seed e o editor de Pessoa reutilizam fTime como texto --------- */
+function normalizePersonEditField(){
+  // sempre que fechar modal, volta o fTime para type=time e rótulo "Hora"
+  const wrap = $("#fTimeWrap");
+  if(!wrap) return;
+  const inp = $("#fTime");
+  const label = wrap.querySelector("span");
+  const isPerson = state.editContext?.type === "person";
+
+  if(isPerson){
+    inp.type = "text";
+    inp.placeholder = "Contato (opcional)";
+    if(label) label.textContent = "Contato";
+  } else {
+    // volta pro padrão
+    inp.type = "time";
+    inp.placeholder = "";
+    if(label) label.textContent = "Hora";
+  }
+}
+
+// fecha modal -> normaliza
+(function hookModalCloseNormalize(){
+  const m = $("#modalEdit");
+  if(!m) return;
+  const obs = new MutationObserver(()=>{
+    // se fechou
+    if(m.getAttribute("aria-hidden") !== "false"){
+      state.editContext = null;
+      normalizePersonEditField();
+    }
+  });
+  obs.observe(m, { attributes:true, attributeFilter:["aria-hidden"] });
+}
+
+/* --------- Corrige: abrir Editor de tarefa sem bucket definido --------- */
+const _openEditModal = openEditModal;
+openEditModal = async function(ctx){
+  // garantir preset
+  ctx = ctx || {};
+  ctx.preset = ctx.preset || {};
+
+  // se for tarefa nova e não veio bucket, assume extra
+  if(ctx.type === "task" && !ctx.id && !ctx.preset.bucket){
+    ctx.preset.bucket = "extra";
+  }
+
+  await _openEditModal(ctx);
+  normalizePersonEditField();
+};
+
+/* --------- Fix: pickNowAndNext mais estável --------- */
+function pickNowAndNextStable(tasks, appts){
+  const openTasks = tasks.filter(t=>!t.done);
+  const must = openTasks.filter(t=>t.bucket==="must");
+  const main = openTasks.filter(t=>t.bucket==="money");
+  const extra = openTasks.filter(t=>t.bucket==="extra");
+
+  const ap = appts
+    .filter(a => (a.status||"pendente")!=="feito")
+    .sort((a,b)=>safe(a.time).localeCompare(safe(b.time)));
+
+  let now = null;
+
+  if(must[0]) now = {kind:"task", item:must[0], label:"⚠️ Não posso falhar"};
+  else if(main[0]) now = {kind:"task", item:main[0], label:"🎯 Função principal"};
+  else if(ap[0]) now = {kind:"appt", item:ap[0], label:"🗓️ Compromisso"};
+  else if(extra[0]) now = {kind:"task", item:extra[0], label:"🟦 Se sobrar tempo"};
+
+  let next = null;
+  if(now?.kind==="task"){
+    const left = openTasks.filter(t=>t.id !== now.item.id);
+    if(left[0]) next = {kind:"task", item:left[0], label:"Próximo passo"};
+  } else if(now?.kind==="appt"){
+    const nextAp = ap[1];
+    if(nextAp) next = {kind:"appt", item:nextAp, label:"Próximo compromisso"};
+  }
+
+  return {now, next};
+}
+
+// substitui a função usada no renderHero
+pickNowAndNext = pickNowAndNextStable;
+
+/* --------- Fix: renderHeroBox sem HTML “solto” --------- */
+const _renderHeroBox = renderHeroBox;
+renderHeroBox = function(el, obj){
+  if(!el) return;
+  if(!obj){
+    el.innerHTML = `<div class="muted">Sem sugestão agora. Coloque 1 item em “Não posso falhar” e 1 em “Função principal”.</div>`;
+    return;
+  }
+  const text = clampText(obj.item?.text || "", 120);
+  const meta = obj.kind==="task"
+    ? (obj.item.bucket==="must" ? "⚠️" : obj.item.bucket==="money" ? "🎯" : "🟦")
+    : (obj.item.time ? `⏱ ${obj.item.time}` : "🗓️");
+
+  el.innerHTML = `
+    <div class="itemTitle">${meta} ${text}</div>
+    <div class="itemMeta">${safe(obj.label)}</div>
+  `;
+};
+
+/* --------- Sugestão: Ctrl/⌘ + K abre Quick --------- */
+(function showShortcutHint(){
+  // só atualiza o subtítulo se quiser
+  // setSub("Ctrl/⌘+K para +Rápido");
+})();
+
+/* --------- Registro do Service Worker --------- */
+(async function registerSW(){
+  try{
+    if("serviceWorker" in navigator){
+      await navigator.serviceWorker.register("./sw.js");
+    }
+  }catch(e){
+    // sem drama: o app funciona mesmo sem SW
+    console.warn("SW erro:", e);
+  }
+})();
+
