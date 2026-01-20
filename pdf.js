@@ -1,266 +1,352 @@
 /* =========================================================
-   BTX FLOW • pdf.js
-   PDF COMPLETO • SEM QUEBRAR • SEM BLOQUEAR BOTAO
+   BTX FLOW • PDF
+   jsPDF – PDFs enquadrados, borda externa + cantos regulares
    ========================================================= */
 
-(function () {
-  const { jsPDF } = window.jspdf;
-
-  if (!jsPDF) {
-    alert("Erro: jsPDF não carregado.");
-    return;
-  }
-
-  /* ---------- util ---------- */
-  function fmtBRL(v) {
-    const n = Number(v || 0);
-    return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-  }
-
-  function formatDateBR(ymd) {
-    if (!ymd) return "";
-    const [y, m, d] = ymd.split("-");
-    return `${d}/${m}/${y}`;
-  }
-
-  function ensureMap(obj) {
-    if (obj instanceof Map) return obj;
-    const m = new Map();
-    Object.keys(obj || {}).forEach(k => m.set(k, obj[k]));
-    return m;
-  }
-
-  function drawFrame(doc, margin) {
-    const W = 210, H = 297;
-    doc.setDrawColor(33, 69, 103);
-    doc.setLineWidth(0.6);
-    doc.roundedRect(margin, margin, W - margin * 2, H - margin * 2, 4, 4);
-  }
-
-  function newPage(doc, margin) {
-    doc.addPage();
-    drawFrame(doc, margin);
-    return margin + 14;
-  }
-
-  /* =========================================================
-     PDF DO DIA
-     ========================================================= */
-  async function pdfToday({ date, tasksByBucket, appts, peopleIndex }) {
-    const peopleMap = ensureMap(peopleIndex);
-    const doc = new jsPDF({ unit: "mm", format: "a4" });
-
-    const W = 210, H = 297;
-    const margin = 12;
-    const innerW = W - margin * 2;
-
-    drawFrame(doc, margin);
-
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(16);
-    doc.text("AGENDA DO DIA", W / 2, margin + 10, { align: "center" });
-
-    doc.setFontSize(11);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(80, 120, 160);
-    doc.text(`Data: ${formatDateBR(date)}`, W / 2, margin + 16, { align: "center" });
-    doc.setTextColor(0, 0, 0);
-
-    let y = margin + 26;
-
-    function section(title, color) {
-      if (y > H - margin - 20) y = newPage(doc, margin);
-      doc.setFillColor(...color);
-      doc.roundedRect(margin + 2, y, innerW - 4, 8, 2, 2, "F");
-      doc.setTextColor(255);
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(11);
-      doc.text(title, margin + 6, y + 5.6);
-      doc.setTextColor(0);
-      y += 12;
-    }
-
-    function item(text) {
-      const lines = doc.splitTextToSize(text, innerW - 14);
-      for (const ln of lines) {
-        if (y > H - margin - 10) y = newPage(doc, margin);
-        doc.circle(margin + 6, y - 1.5, 1.2, "S");
-        doc.setFont("helvetica", "normal");
-        doc.setFontSize(10);
-        doc.text(ln, margin + 10, y);
-        y += 5;
-      }
-    }
-
-    const blocks = [
-      { k: "must", title: "NÃO POSSO FALHAR", color: [255, 91, 110] },
-      { k: "money", title: "GERA DINHEIRO", color: [41, 209, 125] },
-      { k: "extra", title: "SE SOBRAR TEMPO", color: [64, 156, 255] }
-    ];
-
-    for (const b of blocks) {
-      const list = tasksByBucket[b.k] || [];
-      if (!list.length) continue;
-      section(b.title, b.color);
-      list.forEach(t => {
-        const who = t.personId ? peopleMap.get(t.personId)?.name : "";
-        const done = t.done ? " (feito)" : "";
-        item(`${t.text}${who ? " • " + who : ""}${done}`);
-      });
-      y += 2;
-    }
-
-    section("COMPROMISSOS", [120, 160, 200]);
-    if (!appts || !appts.length) {
-      item("Sem compromissos cadastrados.");
-    } else {
-      appts.forEach(a => {
-        const who = a.personId ? peopleMap.get(a.personId)?.name : "";
-        const st = a.status ? ` (${a.status})` : "";
-        item(`${a.time || "--:--"} — ${a.text}${who ? " • " + who : ""}${st}`);
-      });
-    }
-
-    doc.setFontSize(9);
-    doc.setTextColor(120);
-    doc.text("BTX Agenda TDAH • PDF automático", W / 2, H - margin + 6, { align: "center" });
-
-    doc.save(`Agenda_${date}.pdf`);
-  }
-
-  /* =========================================================
-     PDF CAIXA
-     ========================================================= */
-  async function pdfCash({ from, to, items, peopleIndex }) {
-    const peopleMap = ensureMap(peopleIndex);
-    const doc = new jsPDF({ unit: "mm", format: "a4" });
-
-    const W = 210, H = 297;
-    const margin = 12;
-    const innerW = W - margin * 2;
-
-    drawFrame(doc, margin);
-
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(16);
-    doc.text("RELATÓRIO DE CAIXA", W / 2, margin + 10, { align: "center" });
-
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(11);
-    doc.setTextColor(80, 120, 160);
-    doc.text(`Período: ${formatDateBR(from)} a ${formatDateBR(to)}`, W / 2, margin + 16, { align: "center" });
-    doc.setTextColor(0);
-
-    let totalIn = 0, totalOut = 0;
-    items.forEach(c => c.type === "in" ? totalIn += +c.value : totalOut += +c.value);
-
-    let y = margin + 26;
-
-    doc.setFillColor(16, 43, 71);
-    doc.roundedRect(margin + 2, y, innerW - 4, 16, 2, 2, "F");
-    doc.setTextColor(255);
-    doc.setFontSize(10);
-    doc.text(`Entradas: ${fmtBRL(totalIn)}`, margin + 6, y + 7);
-    doc.text(`Saídas: ${fmtBRL(totalOut)}`, margin + 6, y + 12);
-    doc.text(`Saldo: ${fmtBRL(totalIn - totalOut)}`, margin + 110, y + 10);
-    doc.setTextColor(0);
-    y += 22;
-
-    doc.setFontSize(9);
-    items.forEach(c => {
-      if (y > H - margin - 12) y = newPage(doc, margin);
-      const who = c.personId ? peopleMap.get(c.personId)?.name : "";
-      const desc = `${c.text}${who ? " • " + who : ""}`;
-      doc.text(formatDateBR(c.date), margin + 6, y);
-      doc.text(c.type === "in" ? "Entrada" : "Saída", margin + 28, y);
-      doc.text(fmtBRL(c.value), margin + 52, y);
-      const lines = doc.splitTextToSize(desc, innerW - 70);
-      doc.text(lines, margin + 80, y);
-      y += Math.max(6, lines.length * 4.5);
-    });
-
-    doc.save(`Caixa_${from}_a_${to}.pdf`);
-  }
-
-  /* =========================================================
-     PDF PESSOA
-     ========================================================= */
-  async function pdfPerson({ person, timeline }) {
-    const doc = new jsPDF({ unit: "mm", format: "a4" });
-    const W = 210, H = 297;
-    const margin = 12;
-    const innerW = W - margin * 2;
-
-    drawFrame(doc, margin);
-
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(16);
-    doc.text("EXTRATO DA PESSOA", W / 2, margin + 10, { align: "center" });
-
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(11);
-    doc.setTextColor(80, 120, 160);
-    doc.text(`Pessoa: ${person.name}`, W / 2, margin + 16, { align: "center" });
-    doc.setTextColor(0);
-
-    let y = margin + 26;
-
-    timeline.forEach(it => {
-      if (y > H - margin - 12) y = newPage(doc, margin);
-      doc.setFont("helvetica", "bold");
-      doc.text(`${formatDateBR(it.date)} • ${it.type}`, margin + 6, y);
-      y += 5;
-      doc.setFont("helvetica", "normal");
-      const lines = doc.splitTextToSize(it.text || "", innerW - 10);
-      doc.text(lines, margin + 10, y);
-      y += lines.length * 4.5 + 3;
-    });
-
-    doc.save(`Pessoa_${person.name.replace(/\s+/g, "_")}.pdf`);
-  }
-
-  /* =========================================================
-     EXPORT GLOBAL (BOTAO PDF NUNCA TRAVA)
-     ========================================================= */
-  window.BTXPDF = {
-    fmtBRL,
-    pdfToday,
-    pdfCash,
-    pdfPerson
-  };
-
-})();
-// ==== COMPATIBILIDADE TOTAL (antigo + novo) ====
-try {
-  // garante BTXPDF
-  if (!window.BTXPDF) window.BTXPDF = window.BTXPDF || {};
-
-  // se as funções novas existirem, beleza.
-  // se não existirem, mas as antigas existirem, a gente mapeia.
-  if (!window.BTXPDF.pdfToday && typeof window.pdfAgendaDia === "function") {
-    window.BTXPDF.pdfToday = ({date, tasksByBucket, appts, peopleIndex}) => {
-      const peopleMap = (peopleIndex instanceof Map)
-        ? peopleIndex
-        : new Map(Object.entries(peopleIndex || {}).map(([id,p]) => [id,p]));
-      return window.pdfAgendaDia(date, tasksByBucket, appts || [], peopleMap);
-    };
-  }
-
-  // cria as funções antigas (pra não travar app.js velho)
-  if (typeof window.pdfAgendaDia !== "function" && window.BTXPDF.pdfToday) {
-    window.pdfAgendaDia = (date, tasksByBucket, appts, peopleMap) => {
-      const map = (peopleMap instanceof Map) ? peopleMap : new Map(Object.entries(peopleMap || {}));
-      return window.BTXPDF.pdfToday({
-        date,
-        tasksByBucket,
-        appts,
-        peopleIndex: Object.fromEntries(map)
-      });
-    };
-  }
-
-  console.log("PDF OK ✅", "BTXPDF:", !!window.BTXPDF, "pdfAgendaDia:", typeof window.pdfAgendaDia);
-} catch (e) {
-  console.error("Erro ao inicializar PDF:", e);
+function fmtBRL(n){
+  const v = Number(n||0);
+  return v.toLocaleString("pt-BR", { style:"currency", currency:"BRL" });
 }
 
+function pdfFrame(doc, x, y, w, h, r=6){
+  // borda com “cantos regulares” (aproximação com linhas + arcos)
+  // jsPDF tem roundedRect em versões; aqui usamos se existir.
+  if (typeof doc.roundedRect === "function"){
+    doc.roundedRect(x, y, w, h, r, r, "S");
+    return;
+  }
+  doc.rect(x, y, w, h);
+}
+
+function pdfSection(doc, x, y, w, h, title){
+  doc.setDrawColor(40);
+  doc.setLineWidth(0.2);
+  pdfFrame(doc, x, y, w, h, 5);
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(11);
+  doc.text(title, x+6, y+9);
+
+  doc.setDrawColor(90);
+  doc.setLineWidth(0.2);
+  doc.line(x+6, y+12, x+w-6, y+12);
+}
+
+function safeText(doc, text, x, y, maxW){
+  const t = String(text||"").trim();
+  const lines = doc.splitTextToSize(t, maxW);
+  doc.text(lines, x, y);
+  return lines.length;
+}
+
+/* =========================================================
+   PDF: Agenda do dia
+   ========================================================= */
+async function pdfToday({date, tasksByBucket, appts, peopleIndex}){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:"mm", format:"a4" });
+
+  // Página A4: 210 x 297
+  const margin = 10;
+  const W = 210, H = 297;
+
+  // Moldura externa
+  doc.setDrawColor(20);
+  doc.setLineWidth(0.35);
+  pdfFrame(doc, margin, margin, W-2*margin, H-2*margin, 8);
+
+  // Cabeçalho
+  doc.setFont("helvetica","bold");
+  doc.setFontSize(15);
+  doc.text("BTX Flow — Agenda do Dia", margin+6, margin+12);
+
+  doc.setFont("helvetica","normal");
+  doc.setFontSize(10);
+  doc.text(`Data: ${date}`, margin+6, margin+18);
+
+  // Seções
+  const top = margin+22;
+  const colGap = 4;
+
+  const boxW = (W - 2*margin - 2*colGap) / 3;
+  const boxH = 70;
+
+  const buckets = [
+    { key:"must",  title:"NÃO POSSO FALHAR", color:[255,91,110] },
+    { key:"money", title:"FUNÇÃO PRINCIPAL", color:[41,209,125] },
+    { key:"extra", title:"SE SOBRAR TEMPO", color:[64,156,255] }
+  ];
+
+  buckets.forEach((b, i) => {
+    const x = margin + i*(boxW+colGap);
+    const y = top;
+
+    doc.setDrawColor(b.color[0], b.color[1], b.color[2]);
+    doc.setLineWidth(0.35);
+    pdfFrame(doc, x, y, boxW, boxH, 6);
+
+    doc.setFont("helvetica","bold");
+    doc.setFontSize(10);
+    doc.text(b.title, x+4, y+8);
+
+    doc.setFont("helvetica","normal");
+    doc.setFontSize(9);
+
+    const items = tasksByBucket[b.key] || [];
+    let yy = y+14;
+
+    if (!items.length){
+      doc.setTextColor(130);
+      doc.text("—", x+4, yy);
+      doc.setTextColor(0);
+      return;
+    }
+
+    for (const t of items.slice(0, 9)){
+      const mark = t.done ? "✔" : "•";
+      const line = `${mark} ${t.text}`;
+      const linesUsed = safeText(doc, line, x+4, yy, boxW-8);
+      yy += 5 * linesUsed;
+      if (yy > y+boxH-6) break;
+    }
+  });
+
+  // Compromissos
+  const apptY = top + boxH + 8;
+  const apptH = H - margin - apptY - 10;
+
+  doc.setDrawColor(33,69,103);
+  doc.setLineWidth(0.25);
+  pdfSection(doc, margin, apptY, W-2*margin, apptH, "Compromissos do dia");
+
+  doc.setFont("helvetica","normal");
+  doc.setFontSize(10);
+
+  let yCursor = apptY + 18;
+  const x0 = margin + 6;
+
+  if (!appts.length){
+    doc.setTextColor(130);
+    doc.text("Nenhum compromisso cadastrado.", x0, yCursor);
+    doc.setTextColor(0);
+  } else {
+    for (const a of appts){
+      const person = a.personId ? (peopleIndex[a.personId]?.name || "") : "";
+      const left = a.time ? `${a.time}  ` : "";
+      const title = a.text || "(sem título)";
+      const status = a.status || "pendente";
+      const meta = [person, status].filter(Boolean).join(" • ");
+
+      doc.setFont("helvetica","bold");
+      const used1 = safeText(doc, `${left}${title}`, x0, yCursor, W-2*margin-12);
+      yCursor += 6 * used1;
+
+      if (meta){
+        doc.setFont("helvetica","normal");
+        doc.setFontSize(9);
+        doc.setTextColor(90);
+        const used2 = safeText(doc, meta, x0, yCursor, W-2*margin-12);
+        yCursor += 5 * used2;
+        doc.setTextColor(0);
+        doc.setFontSize(10);
+      }
+
+      // linha separadora
+      doc.setDrawColor(60);
+      doc.setLineWidth(0.15);
+      doc.line(margin+6, yCursor, W-margin-6, yCursor);
+      yCursor += 6;
+
+      if (yCursor > apptY + apptH - 10) break;
+    }
+  }
+
+  // Rodapé
+  doc.setFontSize(8);
+  doc.setTextColor(120);
+  doc.text("Gerado pelo BTX Flow (offline-first)", margin+6, H-margin-4);
+  doc.setTextColor(0);
+
+  doc.save(`BTX_Flow_Agenda_${date}.pdf`);
+}
+
+/* =========================================================
+   PDF: Dinheiro (período)
+   ========================================================= */
+async function pdfCash({title, from, to, items, totals, peopleIndex}){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:"mm", format:"a4" });
+
+  const margin = 10;
+  const W = 210, H = 297;
+
+  doc.setDrawColor(20);
+  doc.setLineWidth(0.35);
+  pdfFrame(doc, margin, margin, W-2*margin, H-2*margin, 8);
+
+  doc.setFont("helvetica","bold");
+  doc.setFontSize(15);
+  doc.text("BTX Flow — Dinheiro", margin+6, margin+12);
+
+  doc.setFont("helvetica","normal");
+  doc.setFontSize(10);
+  doc.text(`${title}`, margin+6, margin+18);
+  doc.text(`De: ${from}  Até: ${to}`, margin+6, margin+24);
+
+  // Totais
+  doc.setDrawColor(33,69,103);
+  doc.setLineWidth(0.25);
+  pdfSection(doc, margin, margin+28, W-2*margin, 26, "Resumo do período");
+
+  doc.setFontSize(10);
+  doc.setFont("helvetica","bold");
+  doc.text(`Entradas: ${fmtBRL(totals.in)}`, margin+8, margin+45);
+  doc.text(`Saídas: ${fmtBRL(totals.out)}`, margin+8, margin+52);
+
+  doc.setTextColor(41,209,125);
+  doc.text(`Saldo: ${fmtBRL(totals.balance)}`, margin+120, margin+49);
+  doc.setTextColor(0);
+
+  // Lista
+  const listY = margin+58;
+  const listH = H - margin - listY - 10;
+  pdfSection(doc, margin, listY, W-2*margin, listH, "Lançamentos");
+
+  let yCursor = listY + 18;
+  doc.setFont("helvetica","normal");
+  doc.setFontSize(10);
+
+  if (!items.length){
+    doc.setTextColor(130);
+    doc.text("Nenhum lançamento no período.", margin+6, yCursor);
+    doc.setTextColor(0);
+  } else {
+    for (const c of items.slice(0, 40)){
+      const person = c.personId ? (peopleIndex[c.personId]?.name || "") : "";
+      const sign = c.type === "in" ? "+" : "-";
+      const val = fmtBRL(c.value);
+      const head = `${c.date}  ${sign}${val}`;
+      const meta = [c.category, person].filter(Boolean).join(" • ");
+      const text = c.text || "";
+
+      doc.setFont("helvetica","bold");
+      const used1 = safeText(doc, head, margin+6, yCursor, W-2*margin-12);
+      yCursor += 6 * used1;
+
+      doc.setFont("helvetica","normal");
+      doc.setFontSize(9);
+      doc.setTextColor(90);
+      if (meta){
+        const used2 = safeText(doc, meta, margin+6, yCursor, W-2*margin-12);
+        yCursor += 5 * used2;
+      }
+      if (text){
+        const used3 = safeText(doc, text, margin+6, yCursor, W-2*margin-12);
+        yCursor += 5 * used3;
+      }
+      doc.setTextColor(0);
+      doc.setFontSize(10);
+
+      doc.setDrawColor(60);
+      doc.setLineWidth(0.15);
+      doc.line(margin+6, yCursor, W-margin-6, yCursor);
+      yCursor += 6;
+
+      if (yCursor > listY + listH - 10) break;
+    }
+  }
+
+  doc.setFontSize(8);
+  doc.setTextColor(120);
+  doc.text("Gerado pelo BTX Flow (offline-first)", margin+6, H-margin-4);
+  doc.setTextColor(0);
+
+  doc.save(`BTX_Flow_Dinheiro_${from}_a_${to}.pdf`);
+}
+
+/* =========================================================
+   PDF: Pessoa (linha do tempo)
+   ========================================================= */
+async function pdfPerson({person, timeline, totals, peopleIndex}){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:"mm", format:"a4" });
+
+  const margin = 10;
+  const W = 210, H = 297;
+
+  doc.setDrawColor(20);
+  doc.setLineWidth(0.35);
+  pdfFrame(doc, margin, margin, W-2*margin, H-2*margin, 8);
+
+  doc.setFont("helvetica","bold");
+  doc.setFontSize(15);
+  doc.text("BTX Flow — Pessoa", margin+6, margin+12);
+
+  doc.setFont("helvetica","normal");
+  doc.setFontSize(10);
+  doc.text(`Nome: ${person.name || ""}`, margin+6, margin+18);
+  if (person.phone) doc.text(`Contato: ${person.phone}`, margin+6, margin+24);
+
+  // Totais
+  pdfSection(doc, margin, margin+28, W-2*margin, 26, "Resumo");
+  doc.setFont("helvetica","bold");
+  doc.setFontSize(10);
+  doc.text(`Entradas: ${fmtBRL(totals.in)}`, margin+8, margin+45);
+  doc.text(`Saídas: ${fmtBRL(totals.out)}`, margin+8, margin+52);
+  doc.setTextColor(41,209,125);
+  doc.text(`Saldo: ${fmtBRL(totals.balance)}`, margin+120, margin+49);
+  doc.setTextColor(0);
+
+  // Timeline
+  const listY = margin+58;
+  const listH = H - margin - listY - 10;
+  pdfSection(doc, margin, listY, W-2*margin, listH, "Linha do tempo");
+
+  let yCursor = listY + 18;
+  doc.setFont("helvetica","normal");
+  doc.setFontSize(10);
+
+  if (!timeline.length){
+    doc.setTextColor(130);
+    doc.text("Sem registros ainda.", margin+6, yCursor);
+    doc.setTextColor(0);
+  } else {
+    for (const it of timeline.slice(0, 40)){
+      doc.setFont("helvetica","bold");
+      const head = `${it.date} • ${it.typeLabel}`;
+      const u1 = safeText(doc, head, margin+6, yCursor, W-2*margin-12);
+      yCursor += 6 * u1;
+
+      doc.setFont("helvetica","normal");
+      doc.setFontSize(9);
+      doc.setTextColor(90);
+      if (it.meta){
+        const u2 = safeText(doc, it.meta, margin+6, yCursor, W-2*margin-12);
+        yCursor += 5 * u2;
+      }
+      doc.setTextColor(0);
+      doc.setFontSize(10);
+
+      if (it.text){
+        const u3 = safeText(doc, it.text, margin+6, yCursor, W-2*margin-12);
+        yCursor += 5 * u3;
+      }
+
+      doc.setDrawColor(60);
+      doc.setLineWidth(0.15);
+      doc.line(margin+6, yCursor, W-margin-6, yCursor);
+      yCursor += 6;
+
+      if (yCursor > listY + listH - 10) break;
+    }
+  }
+
+  doc.setFontSize(8);
+  doc.setTextColor(120);
+  doc.text("Gerado pelo BTX Flow (offline-first)", margin+6, H-margin-4);
+  doc.setTextColor(0);
+
+  doc.save(`BTX_Flow_Pessoa_${(person.name||"Pessoa").replace(/\\s+/g,"_")}.pdf`);
+}
+
+window.BTXPDF = { pdfToday, pdfCash, pdfPerson, fmtBRL };
