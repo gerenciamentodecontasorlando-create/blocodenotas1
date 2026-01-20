@@ -1,8 +1,14 @@
-const DB_NAME = "btx_agenda_tdah_v2";
+/* =========================================================
+   BTX FLOW • DB
+   IndexedDB – memória longitudinal offline-first
+   ========================================================= */
+
+const DB_NAME = "btx_flow_tdah_v3";
 const DB_VERSION = 1;
 
 function uid(){
-  return (crypto?.randomUUID?.() || ("id-"+Math.random().toString(16).slice(2)+"-"+Date.now()));
+  if (crypto?.randomUUID) return crypto.randomUUID();
+  return "id-" + Math.random().toString(16).slice(2) + "-" + Date.now();
 }
 function nowISO(){ return new Date().toISOString(); }
 function ymd(d){
@@ -22,24 +28,30 @@ function openDB(){
     req.onupgradeneeded = () => {
       const db = req.result;
 
+      // meta
       const meta = db.createObjectStore("meta", { keyPath: "key" });
 
+      // tarefas
       const tasks = db.createObjectStore("tasks", { keyPath: "id" });
       tasks.createIndex("by_date", "date", { unique:false });
       tasks.createIndex("by_bucket_date", ["bucket","date"], { unique:false });
       tasks.createIndex("by_person", "personId", { unique:false });
 
+      // compromissos
       const appts = db.createObjectStore("appts", { keyPath: "id" });
       appts.createIndex("by_date", "date", { unique:false });
       appts.createIndex("by_person", "personId", { unique:false });
 
+      // pessoas
       const people = db.createObjectStore("people", { keyPath: "id" });
       people.createIndex("by_name", "name", { unique:false });
 
+      // dinheiro
       const cash = db.createObjectStore("cash", { keyPath: "id" });
       cash.createIndex("by_date", "date", { unique:false });
       cash.createIndex("by_person", "personId", { unique:false });
 
+      // arquivos
       const docs = db.createObjectStore("docs", { keyPath: "id" });
       docs.createIndex("by_date", "date", { unique:false });
       docs.createIndex("by_person", "personId", { unique:false });
@@ -60,7 +72,8 @@ async function tx(storeNames, mode, fn){
     const stores = {};
     storeNames.forEach(n => stores[n] = t.objectStore(n));
     let result;
-    Promise.resolve().then(() => fn(stores)).then(r => { result = r; })
+    Promise.resolve().then(() => fn(stores))
+      .then(r => { result = r; })
       .catch(err => reject(err));
     t.oncomplete = () => resolve(result);
     t.onerror = () => reject(t.error);
@@ -95,10 +108,11 @@ function clearStore(store){
   });
 }
 
+/* ===== Helpers para arquivos ===== */
 function blobToBase64(blob){
   return new Promise((resolve) => {
     const r = new FileReader();
-    r.onload = () => resolve(r.result); // data:...
+    r.onload = () => resolve(r.result);
     r.readAsDataURL(blob);
   });
 }
@@ -113,9 +127,13 @@ function base64ToBlob(dataUrl, mime){
   });
 }
 
+/* =========================================================
+   API pública
+   ========================================================= */
 const DB = {
   uid, nowISO, ymd,
 
+  /* META */
   async getMeta(key){
     return tx(["meta"], "readonly", async ({meta}) => {
       const r = await reqToPromise(meta.get(key));
@@ -126,6 +144,7 @@ const DB = {
     return tx(["meta"], "readwrite", async ({meta}) => meta.put({key, value}));
   },
 
+  /* PESSOAS */
   async listPeople(query=""){
     query = (query||"").trim().toLowerCase();
     return tx(["people"], "readonly", async ({people}) => {
@@ -153,21 +172,35 @@ const DB = {
     return tx(["people"], "readonly", async ({people}) => reqToPromise(people.get(id)));
   },
   async deletePerson(id){
-    return tx(["people","tasks","appts","cash","docs"], "readwrite", async ({people,tasks,appts,cash,docs}) => {
-      await reqToPromise(people.delete(id));
-      const [ts, ap, cs, ds] = await Promise.all([getAll(tasks), getAll(appts), getAll(cash), getAll(docs)]);
-      for (const t of ts){ if(t.personId===id){ t.personId=null; t.updatedAt=nowISO(); await reqToPromise(tasks.put(t)); } }
-      for (const a of ap){ if(a.personId===id){ a.personId=null; a.updatedAt=nowISO(); await reqToPromise(appts.put(a)); } }
-      for (const c of cs){ if(c.personId===id){ c.personId=null; c.updatedAt=nowISO(); await reqToPromise(cash.put(c)); } }
-      for (const d of ds){ if(d.personId===id){ d.personId=null; await reqToPromise(docs.put(d)); } }
-    });
+    return tx(["people","tasks","appts","cash","docs"], "readwrite",
+      async ({people,tasks,appts,cash,docs}) => {
+        await reqToPromise(people.delete(id));
+        const [ts, ap, cs, ds] = await Promise.all([
+          getAll(tasks), getAll(appts), getAll(cash), getAll(docs)
+        ]);
+        for (const t of ts){
+          if(t.personId===id){ t.personId=null; t.updatedAt=nowISO(); await reqToPromise(tasks.put(t)); }
+        }
+        for (const a of ap){
+          if(a.personId===id){ a.personId=null; a.updatedAt=nowISO(); await reqToPromise(appts.put(a)); }
+        }
+        for (const c of cs){
+          if(c.personId===id){ c.personId=null; c.updatedAt=nowISO(); await reqToPromise(cash.put(c)); }
+        }
+        for (const d of ds){
+          if(d.personId===id){ d.personId=null; await reqToPromise(docs.put(d)); }
+        }
+      }
+    );
   },
 
+  /* TAREFAS */
   async listTasksByDate(date){
     return tx(["tasks"], "readonly", async ({tasks}) => {
       const idx = tasks.index("by_date");
       const items = await getAllFromIndex(idx, IDBKeyRange.only(date));
-      items.sort((a,b) => (a.bucket||"").localeCompare(b.bucket||"") || (a.createdAt||"").localeCompare(b.createdAt||""));
+      items.sort((a,b) => (a.bucket||"").localeCompare(b.bucket||"") ||
+                          (a.createdAt||"").localeCompare(b.createdAt||""));
       return items;
     });
   },
@@ -175,7 +208,7 @@ const DB = {
     const obj = {
       id: t.id || uid(),
       date: t.date,
-      bucket: t.bucket,
+      bucket: t.bucket, // must | money | extra
       text: (t.text||"").trim(),
       done: !!t.done,
       personId: t.personId || null,
@@ -191,11 +224,13 @@ const DB = {
     return tx(["tasks"], "readwrite", async ({tasks}) => reqToPromise(tasks.delete(id)));
   },
 
+  /* COMPROMISSOS */
   async listAppts(date){
     return tx(["appts"], "readonly", async ({appts}) => {
       const idx = appts.index("by_date");
       const items = await getAllFromIndex(idx, IDBKeyRange.only(date));
-      items.sort((a,b) => (a.time||"").localeCompare(b.time||"") || (a.createdAt||"").localeCompare(b.createdAt||""));
+      items.sort((a,b) => (a.time||"").localeCompare(b.time||"") ||
+                          (a.createdAt||"").localeCompare(b.createdAt||""));
       return items;
     });
   },
@@ -219,11 +254,13 @@ const DB = {
     return tx(["appts"], "readwrite", async ({appts}) => reqToPromise(appts.delete(id)));
   },
 
+  /* DINHEIRO */
   async listCashByRange(fromYMD, toYMD){
     return tx(["cash"], "readonly", async ({cash}) => {
       const idx = cash.index("by_date");
       const items = await getAllFromIndex(idx, IDBKeyRange.bound(fromYMD, toYMD));
-      items.sort((a,b) => (b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""));
+      items.sort((a,b) => (b.date||"").localeCompare(a.date||"") ||
+                          (b.createdAt||"").localeCompare(a.createdAt||""));
       return items;
     });
   },
@@ -231,7 +268,7 @@ const DB = {
     const obj = {
       id: c.id || uid(),
       date: c.date,
-      type: c.type, // in|out
+      type: c.type, // in | out
       value: Number(c.value || 0),
       category: c.category || "Outros",
       text: (c.text||"").trim(),
@@ -248,12 +285,14 @@ const DB = {
     return tx(["cash"], "readwrite", async ({cash}) => reqToPromise(cash.delete(id)));
   },
 
+  /* ARQUIVOS */
   async listDocs(query=""){
     query = (query||"").trim().toLowerCase();
     return tx(["docs"], "readonly", async ({docs}) => {
       const all = await getAll(docs);
       const filtered = query ? all.filter(d => (d.name||"").toLowerCase().includes(query)) : all;
-      filtered.sort((a,b) => (b.date||"").localeCompare(a.date||"") || (b.createdAt||"").localeCompare(a.createdAt||""));
+      filtered.sort((a,b) => (b.date||"").localeCompare(a.date||"") ||
+                             (b.createdAt||"").localeCompare(a.createdAt||""));
       return filtered;
     });
   },
@@ -282,38 +321,46 @@ const DB = {
     return tx(["docs"], "readwrite", async ({docs}) => reqToPromise(docs.delete(id)));
   },
 
+  /* BACKUP */
   async exportAll(){
-    return tx(["meta","people","tasks","appts","cash","docs"], "readonly", async ({meta,people,tasks,appts,cash,docs}) => {
-      const payload = {
-        exportedAt: nowISO(),
-        meta: await getAll(meta),
-        people: await getAll(people),
-        tasks: await getAll(tasks),
-        appts: await getAll(appts),
-        cash: await getAll(cash),
-        docs: []
-      };
-      const allDocs = await getAll(docs);
-      for (const d of allDocs){
-        const b64 = d.blob ? await blobToBase64(d.blob) : null;
-        payload.docs.push({ ...d, blob: b64 });
+    return tx(["meta","people","tasks","appts","cash","docs"], "readonly",
+      async ({meta,people,tasks,appts,cash,docs}) => {
+        const payload = {
+          exportedAt: nowISO(),
+          meta: await getAll(meta),
+          people: await getAll(people),
+          tasks: await getAll(tasks),
+          appts: await getAll(appts),
+          cash: await getAll(cash),
+          docs: []
+        };
+        const allDocs = await getAll(docs);
+        for (const d of allDocs){
+          const b64 = d.blob ? await blobToBase64(d.blob) : null;
+          payload.docs.push({ ...d, blob: b64 });
+        }
+        return payload;
       }
-      return payload;
-    });
+    );
   },
   async importAll(payload){
-    return tx(["meta","people","tasks","appts","cash","docs"], "readwrite", async ({meta,people,tasks,appts,cash,docs}) => {
-      await Promise.all([clearStore(meta), clearStore(people), clearStore(tasks), clearStore(appts), clearStore(cash), clearStore(docs)]);
-      for (const m of (payload.meta||[])) await reqToPromise(meta.put(m));
-      for (const p of (payload.people||[])) await reqToPromise(people.put(p));
-      for (const t of (payload.tasks||[])) await reqToPromise(tasks.put(t));
-      for (const a of (payload.appts||[])) await reqToPromise(appts.put(a));
-      for (const c of (payload.cash||[])) await reqToPromise(cash.put(c));
-      for (const d of (payload.docs||[])){
-        const blob = d.blob ? base64ToBlob(d.blob, d.mime) : null;
-        await reqToPromise(docs.put({ ...d, blob }));
+    return tx(["meta","people","tasks","appts","cash","docs"], "readwrite",
+      async ({meta,people,tasks,appts,cash,docs}) => {
+        await Promise.all([
+          clearStore(meta), clearStore(people), clearStore(tasks),
+          clearStore(appts), clearStore(cash), clearStore(docs)
+        ]);
+        for (const m of (payload.meta||[])) await reqToPromise(meta.put(m));
+        for (const p of (payload.people||[])) await reqToPromise(people.put(p));
+        for (const t of (payload.tasks||[])) await reqToPromise(tasks.put(t));
+        for (const a of (payload.appts||[])) await reqToPromise(appts.put(a));
+        for (const c of (payload.cash||[])) await reqToPromise(cash.put(c));
+        for (const d of (payload.docs||[])){
+          const blob = d.blob ? base64ToBlob(d.blob, d.mime) : null;
+          await reqToPromise(docs.put({ ...d, blob }));
+        }
+        await reqToPromise(meta.put({key:"importedAt", value: nowISO()}));
       }
-      await reqToPromise(meta.put({key:"importedAt", value: nowISO()}));
-    });
+    );
   }
 };
