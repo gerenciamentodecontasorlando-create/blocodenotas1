@@ -1,705 +1,818 @@
-const $ = (q, el=document) => el.querySelector(q);
-const $$ = (q, el=document) => Array.from(el.querySelectorAll(q));
+/* =========================================================
+   BTX FLOW • app.js (UNICO / ESTAVEL / ANTI-TRAVAMENTO)
+   - Hoje (3 listas) + Compromissos
+   - Quick (+Rapido)
+   - Foco 25 (nao trava botoes principais)
+   - PDFs (dia / dinheiro) usando BTXPDF do pdf.js
+   - Backup export/import usando DB.exportAll / DB.importAll
+   ========================================================= */
 
-let state = {
-  view: "today",
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
+
+const state = {
   day: DB.ymd(new Date()),
-  selectedPersonId: null,
+  view: "today",
+  focus: false,
+  edit: null // {type, id, preset}
 };
 
-function setSubtitle(text){ $("#appSub").textContent = text; }
+/* ----------------- helpers ----------------- */
+function safe(v){ return v == null ? "" : String(v); }
+function clamp(t, n=120){ t=String(t||"").trim(); return t.length>n ? t.slice(0,n-1)+"…" : t; }
+function fmtDatePretty(ymd){
+  const p = String(ymd||"").split("-");
+  if(p.length!==3) return ymd;
+  return `${p[2]}/${p[1]}/${p[0]}`;
+}
+function addDays(ymdStr, delta){
+  const d = new Date(ymdStr + "T12:00:00");
+  d.setDate(d.getDate() + delta);
+  return DB.ymd(d);
+}
+function sameDay(a,b){ return String(a)===String(b); }
 
-function openModal(id){ const m = $("#"+id); if(m) m.setAttribute("aria-hidden","false"); }
-function closeModal(id){ const m = $("#"+id); if(m) m.setAttribute("aria-hidden","true"); }
+/* ----------------- modais ----------------- */
+function openModal(id){ const m=$("#"+id); if(m) m.setAttribute("aria-hidden","false"); }
+function closeModal(id){ const m=$("#"+id); if(m) m.setAttribute("aria-hidden","true"); }
+function closeAllModals(){ $$(".modal").forEach(m=>m.setAttribute("aria-hidden","true")); }
 
-function escapeHtml(s=""){
-  return s.replace(/[&<>"']/g, (m)=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" }[m]));
+function wireModalClosers(){
+  $$(".modal [data-close]").forEach(btn=>{
+    btn.addEventListener("click", ()=> closeModal(btn.getAttribute("data-close")));
+  });
+  $$(".modal").forEach(m=>{
+    m.addEventListener("click",(e)=>{ if(e.target===m) m.setAttribute("aria-hidden","true"); });
+  });
 }
 
-function formatDayLabel(dateYMD){
-  const d = new Date(dateYMD+"T12:00:00");
-  const today = DB.ymd(new Date());
-  const tomorrow = DB.ymd(new Date(Date.now()+86400000));
-  if(dateYMD===today) return "Hoje";
-  if(dateYMD===tomorrow) return "Amanhã";
-  const wd = d.toLocaleDateString("pt-BR",{weekday:"long"});
-  return wd.charAt(0).toUpperCase()+wd.slice(1);
-}
-function formatDateFull(dateYMD){
-  const d = new Date(dateYMD+"T12:00:00");
-  return d.toLocaleDateString("pt-BR",{day:"2-digit", month:"long", year:"numeric"});
-}
-function fmtBRL(v){ return Number(v||0).toLocaleString('pt-BR',{style:'currency', currency:'BRL'}); }
-
-function switchView(view){
-  state.view = view;
-  $$(".tab").forEach(b => b.classList.toggle("active", b.dataset.view===view));
-  $$(".view").forEach(v => v.classList.remove("active"));
-  $("#view-"+view).classList.add("active");
-
-  if(view==="today") setSubtitle("Agora & Próximo");
-  if(view==="people") setSubtitle("Memória longitudinal");
-  if(view==="cash") setSubtitle("Fluxo de caixa");
-  if(view==="docs") setSubtitle("Documentos");
+/* ----------------- view / tabs ----------------- */
+function setView(v){
+  state.view = v;
+  $$(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===v));
+  $$(".view").forEach(s=>s.classList.toggle("active", s.id===`view-${v}`));
 }
 
-async function refreshPersonSelect(){
-  const people = await DB.listPeople("");
-  const sel = $("#fPerson");
-  sel.innerHTML =
-    `<option value="">(sem pessoa)</option>` +
-    people.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("");
+/* ----------------- Dia valido ----------------- */
+async function refreshDayValid(){
+  const tasks = await DB.listTasksByDate(state.day);
+  const ok = tasks.some(t=>t.bucket==="must" && t.done) && tasks.some(t=>t.bucket==="money" && t.done);
+  const bar = $("#statusBar");
+  if(bar) bar.style.display = ok ? "block" : "none";
 }
 
-function suggestNowNext(tasks, appts){
-  const notDone = tasks.filter(t => !t.done);
-  const must = notDone.filter(t => t.bucket==="must");
-  const money = notDone.filter(t => t.bucket==="money");
-  const extra = notDone.filter(t => t.bucket==="extra");
-  let now = must[0] || money[0] || extra[0] || null;
+/* ----------------- Hero (AGORA/PROXIMO) ----------------- */
+function pickNowNext(tasks, appts){
+  const openTasks = tasks.filter(t=>!t.done);
+  const must = openTasks.find(t=>t.bucket==="must");
+  const main = openTasks.find(t=>t.bucket==="money");
+  const extra = openTasks.find(t=>t.bucket==="extra");
 
-  const pendingAppt = appts.find(a => a.status==="pendente");
+  const openAppts = appts
+    .filter(a => (a.status||"pendente")!=="feito")
+    .sort((a,b)=>safe(a.time).localeCompare(safe(b.time)));
+
+  let now = null;
+  if(must) now = {kind:"task", item: must, label:"⚠️ Não posso falhar"};
+  else if(main) now = {kind:"task", item: main, label:"🎯 Função principal"};
+  else if(openAppts[0]) now = {kind:"appt", item: openAppts[0], label:"🗓️ Compromisso"};
+  else if(extra) now = {kind:"task", item: extra, label:"🟦 Se sobrar tempo"};
+
   let next = null;
-
-  if(now){
-    next = (must[1] || (money[0] && money[0].id!==now.id ? money[0] : money[1]) || extra[0] || null) || null;
-  } else if(pendingAppt){
-    next = {text: `${pendingAppt.time || "--:--"} — ${pendingAppt.text}`, bucket:"appt"};
+  if(now?.kind==="task"){
+    const left = openTasks.filter(t=>t.id!==now.item.id);
+    if(left[0]) next = {kind:"task", item:left[0], label:"Próximo passo"};
+  } else if(now?.kind==="appt"){
+    if(openAppts[1]) next = {kind:"appt", item:openAppts[1], label:"Próximo compromisso"};
   }
   return {now, next};
 }
 
-function heroItem(obj, peopleMap){
-  const who = obj.personId ? (peopleMap.get(obj.personId)?.name || "") : "";
-  const tag = obj.bucket==="must" ? `<span class="pill red">NÃO FALHAR</span>` :
-              obj.bucket==="money" ? `<span class="pill green">DINHEIRO</span>` :
-              obj.bucket==="extra" ? `<span class="pill blue">EXTRA</span>` :
-              `<span class="pill blue">PRÓXIMO</span>`;
-  const done = obj.done ? `<span class="pill done">feito</span>` : "";
-  return `
-    <div class="item" style="margin-top:6px;">
+function renderHeroBox(el, obj){
+  if(!el) return;
+  if(!obj){
+    el.innerHTML = `<div class="muted">Sem sugestão agora. Coloque 1 item em “Não posso falhar” e 1 em “Função principal”.</div>`;
+    return;
+  }
+  const meta = obj.kind==="task"
+    ? (obj.item.bucket==="must" ? "⚠️" : obj.item.bucket==="money" ? "🎯" : "🟦")
+    : (obj.item.time ? `⏱ ${obj.item.time}` : "🗓️");
+  el.innerHTML = `
+    <div class="itemTitle">${meta} ${clamp(obj.item.text, 120)}</div>
+    <div class="itemMeta">${safe(obj.label)}</div>
+  `;
+}
+
+/* ----------------- render Hoje ----------------- */
+function renderDayHeader(){
+  const lbl = $("#dayLabel");
+  const dt = $("#dayDate");
+  if(lbl) lbl.textContent = sameDay(state.day, DB.ymd(new Date())) ? "Hoje" : "Dia";
+  if(dt) dt.textContent = fmtDatePretty(state.day);
+}
+
+async function renderBuckets(){
+  const tasks = await DB.listTasksByDate(state.day);
+  const buckets = ["must","money","extra"];
+
+  for(const b of buckets){
+    const container = $(`#list-${b}`);
+    if(!container) continue;
+    container.innerHTML = "";
+
+    const items = tasks
+      .filter(t=>t.bucket===b)
+      .sort((a,b)=> (a.done===b.done ? 0 : a.done ? 1 : -1));
+
+    if(!items.length){
+      container.innerHTML = `<div class="muted smallText">Sem itens.</div>`;
+      continue;
+    }
+
+    for(const t of items){
+      const row = document.createElement("div");
+      row.className = "item";
+      row.innerHTML = `
+        <div class="itemLeft">
+          <div class="itemTitle">${clamp(t.text, 90)}</div>
+          <div class="itemMeta">${t.personId ? "👤 vinculado" : ""}</div>
+        </div>
+        <div class="pills">
+          <span class="pill ${t.done ? "done" : ""}">${t.done ? "feito" : "pendente"}</span>
+          <button class="btn small ghost" data-edit-task="${t.id}">Editar</button>
+          <button class="btn small" data-toggle-task="${t.id}">${t.done ? "Desfazer" : "Feito"}</button>
+        </div>
+      `;
+      container.appendChild(row);
+    }
+  }
+
+  $$("[data-toggle-task]").forEach(btn=>{
+    btn.onclick = async ()=>{
+      const id = btn.getAttribute("data-toggle-task");
+      const all = await DB.listTasksByDate(state.day);
+      const t = all.find(x=>x.id===id);
+      if(!t) return;
+      t.done = !t.done;
+      await DB.upsertTask(t);
+      await renderToday();
+    };
+  });
+
+  $$("[data-edit-task]").forEach(btn=>{
+    btn.onclick = ()=> openEditModal({type:"task", id: btn.getAttribute("data-edit-task")});
+  });
+}
+
+async function renderAppts(){
+  const list = $("#apptList");
+  if(!list) return;
+  list.innerHTML = "";
+
+  const appts = await DB.listAppts(state.day);
+  if(!appts.length){
+    list.innerHTML = `<div class="muted smallText">Sem compromissos.</div>`;
+    return;
+  }
+
+  for(const a of appts){
+    const row = document.createElement("div");
+    row.className = "item";
+    row.innerHTML = `
       <div class="itemLeft">
-        <div class="itemTitle">${escapeHtml(obj.text || "")}</div>
-        <div class="itemMeta">${escapeHtml(who)}</div>
+        <div class="itemTitle">${a.time ? `⏱ ${a.time} ` : ""}${clamp(a.text, 90)}</div>
+        <div class="itemMeta">${a.status || "pendente"}${a.personId ? " • 👤 vinculado" : ""}</div>
       </div>
-      <div class="pills">${tag}${done}</div>
-    </div>
-  `;
+      <div class="pills">
+        <span class="pill">${a.status || "pendente"}</span>
+        <button class="btn small ghost" data-edit-appt="${a.id}">Editar</button>
+        <button class="btn small" data-toggle-appt="${a.id}">${a.status==="feito" ? "Reabrir" : "Feito"}</button>
+      </div>
+    `;
+    list.appendChild(row);
+  }
+
+  $$("[data-toggle-appt]").forEach(btn=>{
+    btn.onclick = async ()=>{
+      const id = btn.getAttribute("data-toggle-appt");
+      const appts = await DB.listAppts(state.day);
+      const a = appts.find(x=>x.id===id);
+      if(!a) return;
+      a.status = (a.status==="feito") ? "pendente" : "feito";
+      await DB.upsertAppt(a);
+      await renderToday();
+    };
+  });
+
+  $$("[data-edit-appt]").forEach(btn=>{
+    btn.onclick = ()=> openEditModal({type:"appt", id: btn.getAttribute("data-edit-appt")});
+  });
 }
 
-function taskRow(t, peopleMap){
-  const el = document.createElement("div");
-  el.className = "item";
-  const who = t.personId ? (peopleMap.get(t.personId)?.name || "") : "";
-  el.innerHTML = `
-    <div class="itemLeft">
-      <div class="itemTitle">${escapeHtml(t.text)}</div>
-      <div class="itemMeta">${escapeHtml(who)} • ${t.done ? "feito" : "pendente"}</div>
-    </div>
-    <div class="row gap">
-      <button class="btn small ghost" data-act="toggle">${t.done ? "Desfazer" : "Feito"}</button>
-      <button class="btn small" data-act="edit">Editar</button>
-    </div>
-  `;
-  el.querySelector('[data-act="toggle"]').onclick = async () => {
-    await DB.upsertTask({...t, done: !t.done});
-    await renderToday();
-  };
-  el.querySelector('[data-act="edit"]').onclick = () => openEditor({kind:"task", bucket:t.bucket, item:t});
-  return el;
-}
-
-function apptRow(a, peopleMap){
-  const el = document.createElement("div");
-  el.className = "item";
-  const who = a.personId ? (peopleMap.get(a.personId)?.name || "") : "";
-  const pill = a.status==="feito" ? "green" : a.status==="faltou" ? "red" : "blue";
-  el.innerHTML = `
-    <div class="itemLeft">
-      <div class="itemTitle">${escapeHtml(a.time || "--:--")} — ${escapeHtml(a.text)}</div>
-      <div class="itemMeta">${escapeHtml(who)}</div>
-    </div>
-    <div class="row gap">
-      <span class="pill ${pill}">${escapeHtml(a.status)}</span>
-      <button class="btn small ghost" data-act="done">Feito</button>
-      <button class="btn small ghost" data-act="miss">Faltou</button>
-      <button class="btn small" data-act="edit">Editar</button>
-    </div>
-  `;
-  el.querySelector('[data-act="done"]').onclick = async () => { await DB.upsertAppt({...a, status:"feito"}); await renderToday(); };
-  el.querySelector('[data-act="miss"]').onclick = async () => { await DB.upsertAppt({...a, status:"faltou"}); await renderToday(); };
-  el.querySelector('[data-act="edit"]').onclick = () => openEditor({kind:"appt", item:a});
-  return el;
+async function renderHero(){
+  const tasks = await DB.listTasksByDate(state.day);
+  const appts = await DB.listAppts(state.day);
+  const { now, next } = pickNowNext(tasks, appts);
+  renderHeroBox($("#nowBox"), now);
+  renderHeroBox($("#nextBox"), next);
 }
 
 async function renderToday(){
-  $("#dayLabel").textContent = formatDayLabel(state.day);
-  $("#dayDate").textContent = formatDateFull(state.day);
+  renderDayHeader();
+  await renderHero();
+  await renderBuckets();
+  await renderAppts();
+  await refreshDayValid();
+}
 
+/* ----------------- Pessoas (mantem simples: so cadastro e select) ----------------- */
+async function fillPersonSelect(selectedId=null){
+  const sel = $("#fPerson");
+  if(!sel) return;
   const people = await DB.listPeople("");
-  const peopleMap = new Map(people.map(p => [p.id, p]));
-
-  const tasks = await DB.listTasksByDate(state.day);
-  const appts = await DB.listAppts(state.day);
-
-  for (const b of ["must","money","extra"]){
-    const listEl = $("#list-"+b);
-    listEl.innerHTML = "";
-    const items = tasks.filter(t => t.bucket===b);
-    if(!items.length){
-      listEl.innerHTML = `<div class="muted smallText">Vazio. Clique em “+ adicionar”.</div>`;
-      continue;
-    }
-    for (const t of items) listEl.appendChild(taskRow(t, peopleMap));
-  }
-
-  const {now, next} = suggestNowNext(tasks, appts);
-  $("#nowBox").innerHTML = now ? heroItem(now, peopleMap) : `<div class="muted">Defina 1 item essencial com <b>+ Rápido</b>.</div>`;
-  $("#nextBox").innerHTML = next ? heroItem(next, peopleMap) : `<div class="muted">Depois, coloque 1 item que gere dinheiro. Pronto.</div>`;
-
-  const apptList = $("#apptList");
-  apptList.innerHTML = "";
-  if(!appts.length){
-    apptList.innerHTML = `<div class="muted smallText">Sem compromissos. Clique em “+ compromisso”.</div>`;
-  } else {
-    for(const a of appts) apptList.appendChild(apptRow(a, peopleMap));
+  sel.innerHTML = `<option value="">(sem pessoa)</option>`;
+  for(const p of people){
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.name || "(sem nome)";
+    if(selectedId && selectedId===p.id) opt.selected = true;
+    sel.appendChild(opt);
   }
 }
 
-async function renderPeople(){
-  const q = $("#peopleSearch").value || "";
-  const people = await DB.listPeople(q);
-  const list = $("#peopleList");
-  list.innerHTML = "";
-
-  if(!people.length){
-    list.innerHTML = `<div class="muted smallText">Nenhuma pessoa cadastrada. Clique em “+ pessoa”.</div>`;
-    $("#personPanel").style.display="none";
-    return;
-  }
-
-  for (const p of people){
-    const el = document.createElement("div");
-    el.className="item";
-    el.innerHTML = `
-      <div class="itemLeft">
-        <div class="itemTitle">${escapeHtml(p.name)}</div>
-        <div class="itemMeta">${escapeHtml(p.phone||"")}</div>
-      </div>
-      <div class="row gap">
-        <button class="btn small" data-act="open">Abrir</button>
-        <button class="btn small ghost" data-act="edit">Editar</button>
-      </div>
-    `;
-    el.querySelector('[data-act="open"]').onclick = async () => {
-      state.selectedPersonId = p.id;
-      await renderPersonPanel();
-      $("#personPanel").scrollIntoView({behavior:"smooth", block:"start"});
-    };
-    el.querySelector('[data-act="edit"]').onclick = () => openEditor({kind:"person", item:p});
-    list.appendChild(el);
-  }
+/* ----------------- Dinheiro / Docs / People (render basico) ----------------- */
+async function buildPeopleIndex(){
+  const people = await DB.listPeople("");
+  const map = {};
+  for(const p of people) map[p.id]=p;
+  return map;
 }
 
-async function buildPersonTimeline(personId){
-  const person = await DB.getPerson(personId);
-  if(!person) return {person:null, items:[]};
-
-  const payload = await DB.exportAll();
-  const items = [];
-
-  for (const t of (payload.tasks||[])){
-    if(t.personId===personId){
-      items.push({date:t.date, type:"Tarefa", text:`${t.bucket.toUpperCase()}: ${t.text}${t.done?" (feito)":" (pendente)"}`});
-    }
-  }
-  for (const a of (payload.appts||[])){
-    if(a.personId===personId){
-      items.push({date:a.date, type:"Compromisso", text:`${a.time||"--:--"} — ${a.text} • ${a.status}`});
-    }
-  }
-  for (const c of (payload.cash||[])){
-    if(c.personId===personId){
-      items.push({date:c.date, type:"Caixa", text:`${c.type==="in"?"Entrada":"Saída"} ${fmtBRL(c.value)} • ${c.category} • ${c.text}`});
-    }
-  }
-  for (const d of (payload.docs||[])){
-    if(d.personId===personId){
-      items.push({date:d.date, type:"Documento", text:`${d.name}`});
-    }
-  }
-
-  items.sort((a,b) => (b.date||"").localeCompare(a.date||""));
-  return {person, items};
-}
-
-async function renderPersonPanel(){
-  const personId = state.selectedPersonId;
-  if(!personId){ $("#personPanel").style.display="none"; return; }
-
-  const {person, items} = await buildPersonTimeline(personId);
-  if(!person){ $("#personPanel").style.display="none"; return; }
-
-  $("#personPanel").style.display="block";
-  $("#personName").textContent = person.name;
-  $("#personMeta").textContent = "Linha do tempo • tarefas • caixa • documentos";
-
-  const tl = $("#personTimeline");
-  tl.innerHTML = "";
-
-  if(!items.length){
-    tl.innerHTML = `<div class="muted smallText">Sem histórico ainda. Use os botões acima (+ nota, + entrada, + doc).</div>`;
-    return;
-  }
-
-  for (const it of items.slice(0, 200)){
-    const div = document.createElement("div");
-    div.className="tItem";
-    div.innerHTML = `
-      <div class="tHead">
-        <div class="tDate">${escapeHtml(it.date)} • ${escapeHtml(it.type)}</div>
-      </div>
-      <div class="muted">${escapeHtml(it.text)}</div>
-    `;
-    tl.appendChild(div);
-  }
+function rangeToDates(){
+  const mode = $("#cashRange")?.value || "today";
+  const today = state.day;
+  if(mode==="today") return {from: today, to: today};
+  if(mode==="7") return {from: addDays(today,-6), to: today};
+  if(mode==="30") return {from: addDays(today,-29), to: today};
+  return {from: $("#cashFrom")?.value || today, to: $("#cashTo")?.value || today};
 }
 
 async function renderCash(){
-  const range = $("#cashRange").value;
-  const today = state.day;
-  let from = today, to = today;
-
-  if(range==="7"){
-    from = DB.ymd(new Date(new Date(today+"T12:00:00").getTime() - 6*86400000));
-    to = today;
-  } else if(range==="30"){
-    from = DB.ymd(new Date(new Date(today+"T12:00:00").getTime() - 29*86400000));
-    to = today;
-  } else if(range==="custom"){
-    from = $("#cashFrom").value || today;
-    to = $("#cashTo").value || today;
+  const mode = $("#cashRange")?.value || "today";
+  const fromEl = $("#cashFrom"), toEl = $("#cashTo");
+  if(fromEl && toEl){
+    const show = mode==="custom";
+    fromEl.style.display = show ? "" : "none";
+    toEl.style.display = show ? "" : "none";
   }
 
-  const people = await DB.listPeople("");
-  const peopleMap = new Map(people.map(p => [p.id,p]));
+  const {from,to} = rangeToDates();
+  const peopleIndex = await buildPeopleIndex();
+  const items = await DB.listCashByRange(from,to);
 
-  const items = await DB.listCashByRange(from, to);
-  let totalIn=0,totalOut=0;
-  for (const c of items){
-    if(c.type==="in") totalIn += Number(c.value||0);
-    else totalOut += Number(c.value||0);
-  }
-
-  $("#kpiIn").textContent = fmtBRL(totalIn);
-  $("#kpiOut").textContent = fmtBRL(totalOut);
-  $("#kpiBalance").textContent = fmtBRL(totalIn-totalOut);
+  let sumIn=0,sumOut=0;
+  for(const c of items){ (c.type==="in") ? sumIn+=Number(c.value||0) : sumOut+=Number(c.value||0); }
+  $("#kpiIn").textContent = BTXPDF.fmtBRL(sumIn);
+  $("#kpiOut").textContent = BTXPDF.fmtBRL(sumOut);
+  $("#kpiBalance").textContent = BTXPDF.fmtBRL(sumIn - sumOut);
 
   const list = $("#cashList");
   list.innerHTML = "";
   if(!items.length){
-    list.innerHTML = `<div class="muted smallText">Nenhum lançamento no período. Clique em “+ lançar”.</div>`;
+    list.innerHTML = `<div class="muted smallText">Nenhum lançamento no período.</div>`;
     return;
   }
 
   for(const c of items){
-    const who = c.personId ? (peopleMap.get(c.personId)?.name || "") : "";
-    const pill = c.type==="in" ? "green" : "red";
-    const el = document.createElement("div");
-    el.className="item";
-    el.innerHTML = `
+    const person = c.personId ? (peopleIndex[c.personId]?.name || "") : "";
+    const row = document.createElement("div");
+    row.className = "item";
+    row.innerHTML = `
       <div class="itemLeft">
-        <div class="itemTitle">${escapeHtml(c.text || "(sem descrição)")}</div>
-        <div class="itemMeta">${escapeHtml(c.date)} • ${escapeHtml(c.category||"")} ${who ? " • "+escapeHtml(who):""}</div>
+        <div class="itemTitle">${fmtDatePretty(c.date)} • ${(c.type==="in"?"+":"-")}${BTXPDF.fmtBRL(c.value)}</div>
+        <div class="itemMeta">${[c.category, person].filter(Boolean).join(" • ")}</div>
+        <div class="smallText">${clamp(c.text, 140)}</div>
       </div>
-      <div class="row gap">
-        <span class="pill ${pill}">${c.type==="in" ? "Entrada" : "Saída"}</span>
-        <span class="pill ${pill}">${fmtBRL(c.value)}</span>
-        <button class="btn small" data-act="edit">Editar</button>
+      <div class="pills">
+        <button class="btn small ghost" data-edit-cash="${c.id}">Editar</button>
+        <button class="btn small" data-del-cash="${c.id}">Excluir</button>
       </div>
     `;
-    el.querySelector('[data-act="edit"]').onclick = () => openEditor({kind:"cash", item:c});
-    list.appendChild(el);
+    list.appendChild(row);
   }
+
+  $$("[data-edit-cash]").forEach(btn=> btn.onclick=()=>openEditModal({type:"cash", id: btn.getAttribute("data-edit-cash")}));
+  $$("[data-del-cash]").forEach(btn=> btn.onclick=async()=>{
+    const id = btn.getAttribute("data-del-cash");
+    if(confirm("Excluir lançamento?")){
+      await DB.deleteCash(id);
+      await renderCash();
+    }
+  });
 }
 
 async function renderDocs(){
-  const q = $("#docsSearch").value || "";
-  const people = await DB.listPeople("");
-  const peopleMap = new Map(people.map(p => [p.id,p]));
-
+  const q = ($("#docsSearch")?.value || "").trim();
   const docs = await DB.listDocs(q);
   const list = $("#docsList");
   list.innerHTML = "";
 
   if(!docs.length){
-    list.innerHTML = `<div class="muted smallText">Sem documentos. Clique em “+ documento”.</div>`;
+    list.innerHTML = `<div class="muted smallText">Nenhum arquivo salvo.</div>`;
     return;
   }
 
-  for (const d of docs){
-    const who = d.personId ? (peopleMap.get(d.personId)?.name || "") : "";
-    const el = document.createElement("div");
-    el.className="item";
-    el.innerHTML = `
+  for(const d of docs){
+    const row = document.createElement("div");
+    row.className = "item";
+    row.innerHTML = `
       <div class="itemLeft">
-        <div class="itemTitle">${escapeHtml(d.name)}</div>
-        <div class="itemMeta">${escapeHtml(d.date)} ${who ? " • "+escapeHtml(who):""} • ${(d.size||0)} bytes</div>
+        <div class="itemTitle">${clamp(d.name, 80)}</div>
+        <div class="itemMeta">${fmtDatePretty(d.date)}</div>
+        <div class="smallText">${safe(d.mime)}</div>
       </div>
-      <div class="row gap">
-        <button class="btn small ghost" data-act="dl">Baixar</button>
-        <button class="btn small ghost" data-act="del">Excluir</button>
+      <div class="pills">
+        <button class="btn small" data-dl-doc="${d.id}">Baixar</button>
+        <button class="btn small ghost" data-del-doc="${d.id}">Excluir</button>
       </div>
     `;
-    el.querySelector('[data-act="dl"]').onclick = async () => {
-      const full = await DB.getDoc(d.id);
-      if(!full?.blob){ alert("Arquivo não encontrado."); return; }
-      const url = URL.createObjectURL(full.blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = full.name || "documento";
-      a.click();
-      setTimeout(()=>URL.revokeObjectURL(url), 2000);
-    };
-    el.querySelector('[data-act="del"]').onclick = async () => {
-      if(confirm("Excluir este documento?")){
-        await DB.deleteDoc(d.id);
-        await renderDocs();
-      }
-    };
-    list.appendChild(el);
+    list.appendChild(row);
+  }
+
+  $$("[data-dl-doc]").forEach(btn=> btn.onclick=()=>downloadDoc(btn.getAttribute("data-dl-doc")));
+  $$("[data-del-doc]").forEach(btn=> btn.onclick=async()=>{
+    const id = btn.getAttribute("data-del-doc");
+    if(confirm("Excluir este arquivo?")){
+      await DB.deleteDoc(id);
+      await renderDocs();
+    }
+  });
+}
+
+async function downloadDoc(id){
+  const d = await DB.getDoc(id);
+  if(!d || !d.blob) return alert("Arquivo não encontrado.");
+  const url = URL.createObjectURL(d.blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = d.name || "arquivo";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function renderPeople(){
+  const q = ($("#peopleSearch")?.value || "").trim();
+  const people = await DB.listPeople(q);
+  const list = $("#peopleList");
+  list.innerHTML = "";
+  if(!people.length){
+    list.innerHTML = `<div class="muted smallText">Nenhuma pessoa encontrada.</div>`;
+    return;
+  }
+  for(const p of people){
+    const row = document.createElement("div");
+    row.className = "item";
+    row.innerHTML = `
+      <div class="itemLeft">
+        <div class="itemTitle">${clamp(p.name, 60) || "(sem nome)"}</div>
+        <div class="itemMeta">${p.phone ? "📞 "+p.phone : ""}</div>
+      </div>
+      <div class="pills">
+        <button class="btn small ghost" data-edit-person="${p.id}">Editar</button>
+      </div>
+    `;
+    list.appendChild(row);
+  }
+  $$("[data-edit-person]").forEach(btn=> btn.onclick=()=>openEditModal({type:"person", id: btn.getAttribute("data-edit-person")}));
+}
+
+/* ----------------- Editor modal ----------------- */
+function showEditFields({showTime=false, showMoney=false, showDoc=false}){
+  const tw = $("#fTimeWrap"), mr=$("#moneyRow"), dw=$("#docWrap");
+  if(tw) tw.style.display = showTime ? "" : "none";
+  if(mr) mr.style.display = showMoney ? "" : "none";
+  if(dw) dw.style.display = showDoc ? "" : "none";
+}
+
+function normalizePersonField(isPerson){
+  const wrap = $("#fTimeWrap");
+  const inp = $("#fTime");
+  const label = wrap?.querySelector("span");
+  if(!wrap || !inp) return;
+  if(isPerson){
+    wrap.style.display = "";
+    inp.type = "text";
+    inp.placeholder = "Contato (opcional)";
+    if(label) label.textContent = "Contato";
+  } else {
+    inp.type = "time";
+    inp.placeholder = "";
+    if(label) label.textContent = "Hora";
   }
 }
 
-let editCtx = null;
-
-async function openEditor(ctx){
-  editCtx = ctx;
-  await refreshPersonSelect();
+async function openEditModal(ctx){
+  ctx = ctx || {};
+  ctx.preset = ctx.preset || {};
+  state.edit = ctx;
 
   $("#btnDelete").style.display = "none";
-  $("#moneyRow").style.display = "none";
-  $("#fTimeWrap").style.display = "none";
-  $("#docWrap").style.display = "none";
+  $("#editTitle").textContent = "Adicionar";
+  $("#editSubtitle").textContent = "preencha o mínimo";
+
   $("#fText").value = "";
   $("#fTime").value = "";
   $("#fValue").value = "";
   $("#fCashType").value = "in";
-  $("#fCategory").value = "Atendimento";
-  $("#fPerson").value = "";
+  $("#fCategory").value = "Outros";
+  $("#fDate").value = state.day;
+  $("#fFile").value = "";
 
-  const today = state.day;
-  $("#fDate").value = (ctx.item?.date || today);
+  await fillPersonSelect(ctx.preset.personId || null);
 
-  if(ctx.kind==="task"){
-    $("#editTitle").textContent = ctx.item ? "Editar tarefa" : "Nova tarefa";
-    $("#editSubtitle").textContent = "objetiva: verbo + ação + fim claro";
-    $("#fText").value = ctx.item?.text || "";
-    $("#fPerson").value = ctx.item?.personId || "";
-    $("#btnDelete").style.display = ctx.item ? "inline-flex" : "none";
+  if(ctx.type==="task"){
+    showEditFields({showTime:false, showMoney:false, showDoc:false});
+    normalizePersonField(false);
+    $("#editTitle").textContent = "Tarefa";
+    $("#editSubtitle").textContent = "texto curto e direto";
+    if(ctx.id){
+      const tasks = await DB.listTasksByDate(state.day);
+      const t = tasks.find(x=>x.id===ctx.id);
+      if(!t) return;
+      $("#fText").value = t.text || "";
+      $("#fDate").value = t.date || state.day;
+      await fillPersonSelect(t.personId || null);
+
+      $("#btnDelete").style.display = "";
+      $("#btnDelete").onclick = async ()=>{
+        if(confirm("Excluir tarefa?")){
+          await DB.deleteTask(t.id);
+          closeModal("modalEdit");
+          await renderAll();
+        }
+      };
+      ctx.preset.bucket = t.bucket;
+    } else {
+      if(!ctx.preset.bucket) ctx.preset.bucket = "extra";
+    }
   }
 
-  if(ctx.kind==="appt"){
-    $("#editTitle").textContent = ctx.item ? "Editar compromisso" : "Novo compromisso";
-    $("#editSubtitle").textContent = "adicione hora se tiver";
-    $("#fText").value = ctx.item?.text || "";
-    $("#fTimeWrap").style.display = "block";
-    $("#fTime").value = ctx.item?.time || "";
-    $("#fPerson").value = ctx.item?.personId || "";
-    $("#btnDelete").style.display = ctx.item ? "inline-flex" : "none";
+  if(ctx.type==="appt"){
+    showEditFields({showTime:true, showMoney:false, showDoc:false});
+    normalizePersonField(false);
+    $("#editTitle").textContent = "Compromisso";
+    $("#editSubtitle").textContent = "coloque hora se ajudar";
+    if(ctx.id){
+      const appts = await DB.listAppts(state.day);
+      const a = appts.find(x=>x.id===ctx.id);
+      if(!a) return;
+      $("#fText").value = a.text || "";
+      $("#fTime").value = a.time || "";
+      $("#fDate").value = a.date || state.day;
+      await fillPersonSelect(a.personId || null);
+
+      $("#btnDelete").style.display = "";
+      $("#btnDelete").onclick = async ()=>{
+        if(confirm("Excluir compromisso?")){
+          await DB.deleteAppt(a.id);
+          closeModal("modalEdit");
+          await renderAll();
+        }
+      };
+    }
   }
 
-  if(ctx.kind==="cash"){
-    $("#editTitle").textContent = ctx.item ? "Editar lançamento" : "Novo lançamento";
-    $("#editSubtitle").textContent = "entrada/saída com valor";
-    $("#moneyRow").style.display = "flex";
-    $("#fText").value = ctx.item?.text || "";
-    $("#fValue").value = (ctx.item?.value ?? "");
-    $("#fCashType").value = ctx.item?.type || "in";
-    $("#fCategory").value = ctx.item?.category || "Atendimento";
-    $("#fPerson").value = ctx.item?.personId || "";
-    $("#btnDelete").style.display = ctx.item ? "inline-flex" : "none";
+  if(ctx.type==="cash"){
+    showEditFields({showTime:false, showMoney:true, showDoc:false});
+    normalizePersonField(false);
+    $("#editTitle").textContent = "Dinheiro";
+    $("#editSubtitle").textContent = "entrada/saída + valor + descrição";
+
+    if(ctx.preset.type) $("#fCashType").value = ctx.preset.type;
+
+    if(ctx.id){
+      const all = (await DB.exportAll()).cash || [];
+      const c = all.find(x=>x.id===ctx.id);
+      if(!c) return;
+      $("#fText").value = c.text || "";
+      $("#fValue").value = String(c.value ?? "");
+      $("#fCashType").value = c.type || "in";
+      $("#fCategory").value = c.category || "Outros";
+      $("#fDate").value = c.date || state.day;
+      await fillPersonSelect(c.personId || null);
+
+      $("#btnDelete").style.display = "";
+      $("#btnDelete").onclick = async ()=>{
+        if(confirm("Excluir lançamento?")){
+          await DB.deleteCash(c.id);
+          closeModal("modalEdit");
+          await renderAll();
+        }
+      };
+    }
   }
 
-  if(ctx.kind==="doc"){
-    $("#editTitle").textContent = "Adicionar documento";
-    $("#editSubtitle").textContent = "o arquivo fica salvo no aparelho (offline)";
-    $("#docWrap").style.display = "block";
-    $("#fPerson").value = ctx.item?.personId || "";
+  if(ctx.type==="doc"){
+    showEditFields({showTime:false, showMoney:false, showDoc:true});
+    normalizePersonField(false);
+    $("#editTitle").textContent = "Arquivo";
+    $("#editSubtitle").textContent = "anexar e salvar offline";
   }
 
-  if(ctx.kind==="person"){
-    $("#editTitle").textContent = ctx.item ? "Editar pessoa" : "Nova pessoa";
-    $("#editSubtitle").textContent = "nome é o essencial";
-    $("#fText").value = ctx.item?.name || "";
-    $("#btnDelete").style.display = ctx.item ? "inline-flex" : "none";
-  }
+  if(ctx.type==="person"){
+    showEditFields({showTime:false, showMoney:false, showDoc:false});
+    normalizePersonField(true);
+    $("#editTitle").textContent = "Pessoa";
+    $("#editSubtitle").textContent = "nome + contato opcional";
 
-  if(ctx.kind==="note"){
-    $("#editTitle").textContent = "Nota rápida";
-    $("#editSubtitle").textContent = "vira evento na linha do tempo";
-    $("#fPerson").value = ctx.personId || "";
+    if(ctx.id){
+      const p = await DB.getPerson(ctx.id);
+      if(!p) return;
+      $("#fText").value = p.name || "";
+      $("#fTime").value = p.phone || "";
+
+      $("#btnDelete").style.display = "";
+      $("#btnDelete").onclick = async ()=>{
+        if(confirm("Excluir pessoa? (os registros ficam sem vínculo)")){
+          await DB.deletePerson(p.id);
+          closeModal("modalEdit");
+          await renderAll();
+        }
+      };
+    }
   }
 
   openModal("modalEdit");
 }
 
-async function handleSave(e){
+async function onEditSubmit(e){
   e.preventDefault();
-  if(!editCtx) return;
+  const ctx = state.edit;
+  if(!ctx) return;
 
+  const text = $("#fText").value.trim();
   const date = $("#fDate").value || state.day;
-  const text = ($("#fText").value || "").trim();
   const personId = $("#fPerson").value || null;
 
-  if(editCtx.kind==="task"){
-    if(!text){ alert("Coloque um texto objetivo."); return; }
-    const item = editCtx.item || {bucket: editCtx.bucket, date};
-    await DB.upsertTask({...item, date, text, personId});
+  if(ctx.type==="task"){
+    if(!text) return alert("Digite um texto.");
+    if(ctx.id){
+      const tasks = await DB.listTasksByDate(state.day);
+      const t = tasks.find(x=>x.id===ctx.id);
+      if(!t) return;
+      t.text = text; t.date = date; t.personId = personId;
+      await DB.upsertTask(t);
+    } else {
+      await DB.upsertTask({ date, bucket: ctx.preset.bucket || "extra", text, done:false, personId });
+    }
     closeModal("modalEdit");
-    await renderToday();
+    await renderAll();
+    return;
   }
 
-  if(editCtx.kind==="appt"){
-    if(!text){ alert("Descreva o compromisso."); return; }
-    const time = $("#fTime").value || "";
-    const item = editCtx.item || {date};
-    await DB.upsertAppt({...item, date, time, text, personId});
+  if(ctx.type==="appt"){
+    const time = $("#fTime").value.trim();
+    if(!text) return alert("Digite um texto.");
+    if(ctx.id){
+      const appts = await DB.listAppts(state.day);
+      const a = appts.find(x=>x.id===ctx.id);
+      if(!a) return;
+      a.text=text; a.time=time; a.date=date; a.personId=personId;
+      await DB.upsertAppt(a);
+    } else {
+      await DB.upsertAppt({ date, time, text, status:"pendente", personId });
+    }
     closeModal("modalEdit");
-    await renderToday();
+    await renderAll();
+    return;
   }
 
-  if(editCtx.kind==="cash"){
-    const val = Number($("#fValue").value || 0);
-    if(!val){ alert("Informe um valor."); return; }
-    const type = $("#fCashType").value || "in";
+  if(ctx.type==="cash"){
+    const value = Number($("#fValue").value || 0);
+    const type = $("#fCashType").value;
     const category = $("#fCategory").value || "Outros";
-    const item = editCtx.item || {date};
-    await DB.upsertCash({...item, date, type, category, text, value: val, personId});
+    if(!value || value<=0) return alert("Informe um valor.");
+    if(!text) return alert("Informe uma descrição.");
+
+    if(ctx.id){
+      const all = (await DB.exportAll()).cash || [];
+      const c = all.find(x=>x.id===ctx.id);
+      if(!c) return;
+      c.value=value; c.type=type; c.category=category; c.text=text; c.date=date; c.personId=personId;
+      await DB.upsertCash(c);
+    } else {
+      await DB.upsertCash({ date, type, value, category, text, personId });
+    }
     closeModal("modalEdit");
-    await renderCash();
-    if(state.selectedPersonId) await renderPersonPanel();
-  }
-
-  if(editCtx.kind==="doc"){
-    const f = $("#fFile").files[0];
-    if(!f){ alert("Selecione um arquivo."); return; }
-    await DB.addDoc({date, name: f.name, mime: f.type, size: f.size, personId, blob: f});
-    closeModal("modalEdit");
-    await renderDocs();
-    if(state.selectedPersonId) await renderPersonPanel();
-  }
-
-  if(editCtx.kind==="person"){
-    if(!text){ alert("Nome é obrigatório."); return; }
-    const p = editCtx.item || {};
-    await DB.upsertPerson({ ...p, name:text });
-    closeModal("modalEdit");
-    await renderPeople();
-    if(state.selectedPersonId) await renderPersonPanel();
-  }
-
-  if(editCtx.kind==="note"){
-    if(!text){ alert("Escreva uma nota curta."); return; }
-    await DB.upsertTask({date, bucket:"extra", text:`[NOTA] ${text}`, done:true, personId});
-    closeModal("modalEdit");
-    if(state.selectedPersonId) await renderPersonPanel();
-    await renderToday();
-  }
-}
-
-async function handleDelete(){
-  if(!editCtx?.item) return closeModal("modalEdit");
-  if(!confirm("Excluir este item?")) return;
-
-  const id = editCtx.item.id;
-  if(editCtx.kind==="task") await DB.deleteTask(id);
-  if(editCtx.kind==="appt") await DB.deleteAppt(id);
-  if(editCtx.kind==="cash") await DB.deleteCash(id);
-  if(editCtx.kind==="person") await DB.deletePerson(id);
-
-  closeModal("modalEdit");
-  await renderAll();
-}
-
-async function setupEvents(){
-  $$(".tab").forEach(b => b.addEventListener("click", async () => {
-    switchView(b.dataset.view);
     await renderAll();
-  }));
+    return;
+  }
 
-  $("#prevDay").onclick = async () => {
-    state.day = DB.ymd(new Date(new Date(state.day+"T12:00:00").getTime()-86400000));
-    await renderAll();
-  };
-  $("#nextDay").onclick = async () => {
-    state.day = DB.ymd(new Date(new Date(state.day+"T12:00:00").getTime()+86400000));
-    await renderAll();
-  };
-
-  $$('[data-add]').forEach(btn => btn.addEventListener("click", () => {
-    openEditor({kind:"task", bucket: btn.dataset.add, item:null});
-  }));
-
-  $("#btnAddAppt").onclick = () => openEditor({kind:"appt", item:null});
-  $("#btnAddPerson").onclick = () => openEditor({kind:"person", item:null});
-  $("#btnAddCash").onclick = () => openEditor({kind:"cash", item:null});
-  $("#btnAddDoc").onclick = () => openEditor({kind:"doc", item:null});
-
-  $("#btnQuick").onclick = () => openModal("modalQuick");
-  $("#btnHelp").onclick = () => openModal("modalHelp");
-  $("#btnBackup").onclick = () => openModal("modalBackup");
-
-  $("#btnTodayPDF").onclick = async () => {
-    const people = await DB.listPeople("");
-    const peopleMap = new Map(people.map(p => [p.id,p]));
-    const tasks = await DB.listTasksByDate(state.day);
-    const appts = await DB.listAppts(state.day);
-    const tasksByBucket = {
-      must: tasks.filter(t=>t.bucket==="must"),
-      money: tasks.filter(t=>t.bucket==="money"),
-      extra: tasks.filter(t=>t.bucket==="extra"),
-    };
-    await BTXPDF.pdfToday({
-      date: state.day,
-      tasksByBucket,
-      appts,
-      peopleIndex:
-  Object.fromentries(peoplemap)
+  if(ctx.type==="doc"){
+    const file = $("#fFile").files?.[0];
+    if(!file) return alert("Escolha um arquivo.");
+    await DB.addDoc({
+      date,
+      name: file.name,
+      mime: file.type || "application/octet-stream",
+      size: file.size || 0,
+      personId: personId,
+      relatedType: null,
+      relatedId: null,
+      blob: file
     });
+    closeModal("modalEdit");
+    await renderAll();
+    return;
+  }
+
+  if(ctx.type==="person"){
+    const phone = $("#fTime").value.trim();
+    if(!text) return alert("Digite o nome.");
+    await DB.upsertPerson({ id: ctx.id || null, name:text, phone });
+    closeModal("modalEdit");
+    await renderAll();
+    return;
+  }
+}
+
+/* ----------------- Quick + Backup + PDF ----------------- */
+function bindQuickButtons(){
+  $$("[data-quick]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const k = btn.getAttribute("data-quick");
+      closeModal("modalQuick");
+      if(k==="must") return openEditModal({type:"task", preset:{bucket:"must"}});
+      if(k==="money") return openEditModal({type:"task", preset:{bucket:"money"}});
+      if(k==="extra") return openEditModal({type:"task", preset:{bucket:"extra"}});
+      if(k==="appt") return openEditModal({type:"appt"});
+      if(k==="in") return openEditModal({type:"cash", preset:{type:"in"}});
+      if(k==="out") return openEditModal({type:"cash", preset:{type:"out"}});
+      if(k==="doc") return openEditModal({type:"doc"});
+      if(k==="person") return openEditModal({type:"person"});
+    };
+  });
+}
+
+async function exportBackup(){
+  const payload = await DB.exportAll();
+  const blob = new Blob([JSON.stringify(payload)], {type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `BTX_Flow_Backup_${DB.ymd(new Date())}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+async function importBackup(file){
+  const txt = await file.text();
+  await DB.importAll(JSON.parse(txt));
+}
+
+async function pdfDay(){
+  const tasks = await DB.listTasksByDate(state.day);
+  const appts = await DB.listAppts(state.day);
+  const peopleIndex = await buildPeopleIndex();
+  const tasksByBucket = {
+    must: tasks.filter(t=>t.bucket==="must"),
+    money: tasks.filter(t=>t.bucket==="money"),
+    extra: tasks.filter(t=>t.bucket==="extra")
   };
+  await BTXPDF.pdfToday({date: state.day, tasksByBucket, appts, peopleIndex});
+}
+async function pdfMoney(){
+  const {from,to} = rangeToDates();
+  const peopleIndex = await buildPeopleIndex();
+  const items = await DB.listCashByRange(from,to);
+  let sumIn=0,sumOut=0;
+  for(const c of items){ (c.type==="in") ? sumIn+=Number(c.value||0) : sumOut+=Number(c.value||0); }
+  const totals = {in:sumIn, out:sumOut, balance: sumIn-sumOut};
+  await BTXPDF.pdfCash({title:"Período", from, to, items, totals, peopleIndex});
+}
 
-  $("#btnCashPDF").onclick = async () => {
-    const range = $("#cashRange").value;
-    const today = state.day;
-    let from=today,to=today;
-    if(range==="7"){ from = DB.ymd(new Date(new Date(today+"T12:00:00").getTime() - 6*86400000)); to=today; }
-    else if(range==="30"){ from = DB.ymd(new Date(new Date(today+"T12:00:00").getTime() - 29*86400000)); to=today; }
-    else if(range==="custom"){ from = $("#cashFrom").value || today; to = $("#cashTo").value || today; }
+/* ----------------- Render geral ----------------- */
+async function renderAll(){
+  if(state.view==="today") return renderToday();
+  if(state.view==="people") return renderPeople();
+  if(state.view==="cash") return renderCash();
+  if(state.view==="docs") return renderDocs();
+}
 
-    const people = await DB.listPeople("");
-    const peopleMap = new Map(people.map(p => [p.id,p]));
-    const items = await DB.listCashByRange(from, to);
-    await pdfCaixa(from, to, items, peopleMap);
-  };
-
-  $("#btnPersonPDF").onclick = async () => {
-    if(!state.selectedPersonId) return alert("Abra uma pessoa primeiro.");
-    const {person, items} = await buildPersonTimeline(state.selectedPersonId);
-    if(person) await pdfPessoa(person, items);
-  };
-
-  $("#btnPDF").onclick = () => {
-    if(state.view==="today") $("#btnTodayPDF").click();
-    else if(state.view==="cash") $("#btnCashPDF").click();
-    else if(state.view==="people") $("#btnPersonPDF").click();
-    else alert("Use PDF no Hoje/Caixa/Pessoa.");
-  };
-
-  $("#cashRange").onchange = async () => {
-    const isCustom = $("#cashRange").value==="custom";
-    $("#cashFrom").style.display = isCustom ? "block" : "none";
-    $("#cashTo").style.display = isCustom ? "block" : "none";
-    await renderCash();
-  };
-  $("#cashFrom").onchange = renderCash;
-  $("#cashTo").onchange = renderCash;
-
-  $("#peopleSearch").oninput = renderPeople;
-  $("#btnClearPeopleSearch").onclick = async () => { $("#peopleSearch").value=""; await renderPeople(); };
-  $("#docsSearch").oninput = renderDocs;
-  $("#btnClearDocsSearch").onclick = async () => { $("#docsSearch").value=""; await renderDocs(); };
-
-  $$("[data-quick]").forEach(b => b.onclick = () => {
-    const q = b.dataset.quick;
-    closeModal("modalQuick");
-    if(q==="must") openEditor({kind:"task", bucket:"must", item:null});
-    if(q==="money") openEditor({kind:"task", bucket:"money", item:null});
-    if(q==="extra") openEditor({kind:"task", bucket:"extra", item:null});
-    if(q==="appt") openEditor({kind:"appt", item:null});
-    if(q==="in") openEditor({kind:"cash", item:{date: state.day, type:"in", category:"Atendimento", text:"", value:"", personId:null}});
-    if(q==="out") openEditor({kind:"cash", item:{date: state.day, type:"out", category:"Material", text:"", value:"", personId:null}});
-    if(q==="doc") openEditor({kind:"doc", item:{date: state.day, personId:null}});
-    if(q==="person") openEditor({kind:"person", item:null});
+/* ----------------- init / eventos ----------------- */
+function setupEvents(){
+  // tabs
+  $$(".tab").forEach(t=>{
+    t.onclick = async ()=>{
+      setView(t.dataset.view);
+      await renderAll();
+    };
   });
 
-  $$("[data-close]").forEach(b => b.onclick = () => closeModal(b.dataset.close));
+  // dias
+  $("#prevDay").onclick = async ()=>{ state.day = addDays(state.day,-1); await renderAll(); };
+  $("#nextDay").onclick = async ()=>{ state.day = addDays(state.day,+1); await renderAll(); };
 
-  $("#editForm").addEventListener("submit", handleSave);
-  $("#btnDelete").onclick = handleDelete;
+  // add buckets
+  $$("[data-add]").forEach(btn=>{
+    btn.onclick = ()=> openEditModal({type:"task", preset:{bucket: btn.getAttribute("data-add")}});
+  });
 
-  $("#btnPersonAddNote").onclick = () => {
-    if(!state.selectedPersonId) return;
-    openEditor({kind:"note", personId: state.selectedPersonId});
-  };
-  $("#btnPersonAddIn").onclick = () => {
-    if(!state.selectedPersonId) return;
-    openEditor({kind:"cash", item:{date: state.day, type:"in", category:"Atendimento", text:"", value:"", personId: state.selectedPersonId}});
-  };
-  $("#btnPersonAddOut").onclick = () => {
-    if(!state.selectedPersonId) return;
-    openEditor({kind:"cash", item:{date: state.day, type:"out", category:"Material", text:"", value:"", personId: state.selectedPersonId}});
-  };
-  $("#btnPersonAttach").onclick = () => {
-    if(!state.selectedPersonId) return;
-    openEditor({kind:"doc", item:{date: state.day, personId: state.selectedPersonId}});
-  };
+  // appt
+  $("#btnAddAppt").onclick = ()=> openEditModal({type:"appt"});
 
-  $("#btnExport").onclick = async () => {
-    const payload = await DB.exportAll();
-    const blob = new Blob([JSON.stringify(payload)], {type:"application/json"});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `BTX_Backup_${new Date().toISOString().slice(0,10)}.json`;
-    a.click();
-    setTimeout(()=>URL.revokeObjectURL(url), 1500);
+  // quick
+  $("#btnQuick").onclick = ()=> openModal("modalQuick");
+
+  // PDFs
+  $("#btnTodayPDF").onclick = pdfDay;
+  $("#btnCashPDF").onclick = pdfMoney;
+  $("#btnPDF").onclick = ()=>{
+    if(state.view==="cash") return pdfMoney();
+    return pdfDay();
   };
 
-  $("#backupFile").onchange = async (e) => {
-    const f = e.target.files[0];
+  // backup
+  $("#btnBackup").onclick = ()=> openModal("modalBackup");
+  $("#btnExport").onclick = exportBackup;
+  $("#backupFile").onchange = async (e)=>{
+    const f = e.target.files?.[0];
     if(!f) return;
-    try{
-      const text = await f.text();
-      const payload = JSON.parse(text);
-      if(!confirm("Importar este backup? Isso substitui os dados atuais.")) return;
-      await DB.importAll(payload);
-      alert("Backup importado com sucesso.");
+    if(confirm("Importar backup vai substituir os dados atuais. Continuar?")){
+      await importBackup(f);
       closeModal("modalBackup");
       await renderAll();
-    } catch(err){
-      console.error(err);
-      alert("Arquivo inválido.");
-    } finally {
-      $("#backupFile").value = "";
+      alert("Backup importado!");
     }
+    e.target.value = "";
   };
 
-  // First run: ajuda + seed
-  const first = await DB.getMeta("firstRunDone");
-  if(!first){
-    await DB.setMeta("firstRunDone", "yes");
-    openModal("modalHelp");
-    await DB.upsertTask({date: state.day, bucket:"must", text:"Pagar conta (2 min)", done:false, personId:null});
-    await DB.upsertTask({date: state.day, bucket:"money", text:"Confirmar 1 paciente no WhatsApp", done:false, personId:null});
-    await DB.upsertAppt({date: state.day, time:"09:00", text:"Atendimento (exemplo)", status:"pendente", personId:null});
-  }
+  // help
+  $("#btnHelp").onclick = ()=> openModal("modalHelp");
 
-  // PWA offline
-  if("serviceWorker" in navigator){
-    try{ await navigator.serviceWorker.register("./sw.js"); }catch(e){ console.warn("SW fail", e); }
-  }
+  // busca
+  $("#peopleSearch")?.addEventListener("input", renderPeople);
+  $("#btnClearPeopleSearch")?.addEventListener("click", async()=>{ $("#peopleSearch").value=""; await renderPeople(); });
+
+  $("#cashRange")?.addEventListener("change", renderCash);
+  $("#cashFrom")?.addEventListener("change", renderCash);
+  $("#cashTo")?.addEventListener("change", renderCash);
+  $("#btnAddCash")?.addEventListener("click", ()=> openEditModal({type:"cash"}));
+
+  $("#docsSearch")?.addEventListener("input", renderDocs);
+  $("#btnClearDocsSearch")?.addEventListener("click", async()=>{ $("#docsSearch").value=""; await renderDocs(); });
+  $("#btnAddDoc")?.addEventListener("click", ()=> openEditModal({type:"doc"}));
+
+  // foco (NÃO trava os botões principais)
+  $("#btnFocus").onclick = ()=>{
+    state.focus = true;
+    document.body.classList.add("focusMode");
+    $("#btnFocus").style.display = "none";
+    $("#btnUnfocus").style.display = "inline-flex";
+  };
+  $("#btnUnfocus").onclick = ()=>{
+    state.focus = false;
+    document.body.classList.remove("focusMode");
+    $("#btnUnfocus").style.display = "none";
+    $("#btnFocus").style.display = "inline-flex";
+  };
+
+  // editor submit
+  $("#editForm").addEventListener("submit", onEditSubmit);
+
+  // ESC
+  document.addEventListener("keydown",(e)=>{ if(e.key==="Escape") closeAllModals(); });
+
+  wireModalClosers();
+  bindQuickButtons();
 }
 
-async function renderAll(){
-  await refreshPersonSelect();
-  if(state.view==="today") await renderToday();
-  if(state.view==="people") { await renderPeople(); if(state.selectedPersonId) await renderPersonPanel(); }
-  if(state.view==="cash") await renderCash();
-  if(state.view==="docs") await renderDocs();
+async function seedIfEmpty(){
+  const seeded = await DB.getMeta("seededAt");
+  if(seeded) return;
+  await DB.upsertTask({ date: state.day, bucket:"must",  text:"Resolver 1 pendência chata (5 min)", done:false, personId:null });
+  await DB.upsertTask({ date: state.day, bucket:"money", text:"FUNÇÃO PRINCIPAL: avançar 1 etapa do objetivo (25 min)", done:false, personId:null });
+  await DB.upsertTask({ date: state.day, bucket:"extra", text:"Organizar 1 coisa pequena (2 min)", done:false, personId:null });
+  await DB.upsertAppt({ date: state.day, time:"09:00", text:"Bloco de foco (exemplo) — 25 min", status:"pendente", personId:null });
+  await DB.setMeta("seededAt", DB.nowISO());
 }
 
-window.addEventListener("DOMContentLoaded", async () => {
-  await setupEvents();
+document.addEventListener("DOMContentLoaded", async ()=>{
+  await openDB();
+  await seedIfEmpty();
+  setupEvents();
+  setView("today");
   await renderAll();
+
+  // registra SW (se existir)
+  try{
+    if("serviceWorker" in navigator){
+      await navigator.serviceWorker.register("./sw.js");
+    }
+  }catch(err){
+    console.warn("SW erro:", err);
+  }
 });
