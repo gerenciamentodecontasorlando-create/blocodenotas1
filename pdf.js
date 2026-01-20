@@ -230,3 +230,37 @@
   };
 
 })();
+// ==== COMPATIBILIDADE TOTAL (antigo + novo) ====
+try {
+  // garante BTXPDF
+  if (!window.BTXPDF) window.BTXPDF = window.BTXPDF || {};
+
+  // se as funções novas existirem, beleza.
+  // se não existirem, mas as antigas existirem, a gente mapeia.
+  if (!window.BTXPDF.pdfToday && typeof window.pdfAgendaDia === "function") {
+    window.BTXPDF.pdfToday = ({date, tasksByBucket, appts, peopleIndex}) => {
+      const peopleMap = (peopleIndex instanceof Map)
+        ? peopleIndex
+        : new Map(Object.entries(peopleIndex || {}).map(([id,p]) => [id,p]));
+      return window.pdfAgendaDia(date, tasksByBucket, appts || [], peopleMap);
+    };
+  }
+
+  // cria as funções antigas (pra não travar app.js velho)
+  if (typeof window.pdfAgendaDia !== "function" && window.BTXPDF.pdfToday) {
+    window.pdfAgendaDia = (date, tasksByBucket, appts, peopleMap) => {
+      const map = (peopleMap instanceof Map) ? peopleMap : new Map(Object.entries(peopleMap || {}));
+      return window.BTXPDF.pdfToday({
+        date,
+        tasksByBucket,
+        appts,
+        peopleIndex: Object.fromEntries(map)
+      });
+    };
+  }
+
+  console.log("PDF OK ✅", "BTXPDF:", !!window.BTXPDF, "pdfAgendaDia:", typeof window.pdfAgendaDia);
+} catch (e) {
+  console.error("Erro ao inicializar PDF:", e);
+}
+
