@@ -285,3 +285,23 @@
 
   window.BTXPDF = BTXPDF;
 })();
+// ==== Compatibilidade com o app (para não travar o botão PDF) ====
+window.BTXPDF = {
+  fmtBRL,
+  pdfToday: ({date, tasksByBucket, appts, peopleIndex}) => {
+    // peopleIndex pode vir como objeto. seu PDF espera peopleMap (Map).
+    const peopleMap = (peopleIndex instanceof Map)
+      ? peopleIndex
+      : new Map(Object.entries(peopleIndex || {}).map(([id,p]) => [id,p]));
+    return pdfAgendaDia(date, tasksByBucket, appts || [], peopleMap);
+  },
+  pdfCash: ({title, from, to, items, totals, peopleIndex}) => {
+    const peopleMap = (peopleIndex instanceof Map)
+      ? peopleIndex
+      : new Map(Object.entries(peopleIndex || {}).map(([id,p]) => [id,p]));
+    return pdfCaixa(from, to, items || [], peopleMap);
+  },
+  pdfPerson: ({person, timeline, totals, peopleIndex}) => {
+    return pdfPessoa(person, timeline || []);
+  }
+};
